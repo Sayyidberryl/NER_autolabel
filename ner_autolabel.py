@@ -1,42 +1,3 @@
-"""
-NER Auto-Labeling Script v9
-Label Studio + Groq (meta-llama/llama-4-scout-17b-16e-instruct)
-Project 14 | ID Range: 53149 - 79722
-
-═══════════════════════════════════════════════════════════════
-PERUBAHAN v9 vs v8 — FIX KRITIS + OPTIMASI
-═══════════════════════════════════════════════════════════════
-
-[FIX KRITIS] DUAL ENDPOINT:
-  - Mode NORMAL  → pakai view=25  (hanya unlabeled, efisien)
-  - Mode RELABEL → pakai /api/projects/14/tasks?page_size=500
-    → return SEMUA task termasuk yang sudah labeled
-    → ini fix utama: v8 gagal total karena view=25 tidak return
-       task yang sudah labeled, langsung "min ID > ID_END"
-
-[FIX] KEY ROTATION lebih agresif:
-  - Round-robin per request (bukan hanya saat 429)
-  - Tiap key dapat giliran merata → 5 key × 30 RPM = ~150 req/mnt
-  - Saat 429: rotasi + cooldown 2 detik per key sebelum retry
-  - Semua key habis: backoff 60 detik lalu reset
-
-[OPTIMASI] MODE selector di konfigurasi:
-  MODE = "relabel"  → fetch semua, delete lama, label ulang
-  MODE = "normal"   → fetch unlabeled via view=25, skip yang sudah
-
-[OPTIMASI] Prompt token-efficient untuk scout-17b:
-  - Konteks domain DKI tetap ada (kritis untuk akurasi)
-  - Disambiguation rules tetap lengkap
-  - Few-shot examples dipertahankan (proven dari v8)
-  - Estimasi ~1800 token/request, TPM 30K → max ~16 req/mnt/key
-
-Usage:
-    pip install requests groq tqdm
-    Set MODE = "relabel" untuk relabel semua task di range
-    Set MODE = "normal"  untuk hanya label task baru
-    python ner_autolabel_v9.py
-"""
-
 import json
 import re
 import time
@@ -48,12 +9,10 @@ import requests
 from groq import Groq
 from tqdm import tqdm
 
-# Load .env file automatically (fallback manual parsing if python-dotenv is not installed)
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    # Manual .env loader for environment-independent execution
     env_path = Path(".env")
     if env_path.exists():
         with open(env_path, "r", encoding="utf-8") as f:
@@ -63,16 +22,12 @@ except ImportError:
                     key, val = line.split("=", 1)
                     os.environ[key.strip()] = val.strip().strip("'\"")
 
-# ══════════════════════════════════════════════════════════════
-# KONFIGURASI — DIBACA DARI ENVIRONMENT / ENV FILE
-# ══════════════════════════════════════════════════════════════
 LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "https://labelstudio.starcore.id")
 REFRESH_TOKEN    = os.getenv("REFRESH_TOKEN")
 
 if not REFRESH_TOKEN:
     raise ValueError("REFRESH_TOKEN harus diatur di environment variable atau file .env")
 
-# Ambil GROQ_API_KEYS dari env, dipisahkan koma
 groq_keys_raw = os.getenv("GROQ_API_KEYS")
 if groq_keys_raw:
     GROQ_API_KEYS = [k.strip() for k in groq_keys_raw.split(",") if k.strip()]
@@ -80,30 +35,23 @@ else:
     raise ValueError("GROQ_API_KEYS harus diatur di environment variable atau file .env")
 
 PROJECT_ID = int(os.getenv("PROJECT_ID", "14"))
-VIEW_ID    = int(os.getenv("VIEW_ID", "25"))   # hanya dipakai di MODE = "normal"
+VIEW_ID    = int(os.getenv("VIEW_ID", "25"))
 
-# ── RANGE TASK ──
 ID_START = int(os.getenv("ID_START", "53149"))
-ID_END   = int(os.getenv("ID_END", "53750"))   # Test ~600 task yang sudah labeled. Ganti ke 67951 untuk Hari 1.
+ID_END   = int(os.getenv("ID_END", "53750"))
 
-# ── MODE ──
-# "relabel" → fetch SEMUA task (labeled + unlabeled), delete annotation lama, label ulang
-# "normal"  → fetch hanya unlabeled via view=25, skip yang sudah labeled
 MODE = os.getenv("MODE", "relabel")
 
-# ── RATE LIMIT ──
-MAX_RPM_PER_KEY    = int(os.getenv("MAX_RPM_PER_KEY", "14"))     # req/mnt per key (aman di bawah TPM limit)
-GROQ_DELAY_SEC     = float(os.getenv("GROQ_DELAY_SEC", "0.3"))    # delay tambahan setelah request sukses
-LABEL_STUDIO_DELAY = float(os.getenv("LABEL_STUDIO_DELAY", "0.15"))   # delay setelah POST annotation
+MAX_RPM_PER_KEY    = int(os.getenv("MAX_RPM_PER_KEY", "14"))
+GROQ_DELAY_SEC     = float(os.getenv("GROQ_DELAY_SEC", "0.3"))
+LABEL_STUDIO_DELAY = float(os.getenv("LABEL_STUDIO_DELAY", "0.15"))
 
 MAX_RETRIES        = int(os.getenv("MAX_RETRIES", "5"))
 TOKEN_REFRESH_SECS = int(os.getenv("TOKEN_REFRESH_SECS", "240"))
-BATCH_SIZE         = int(os.getenv("BATCH_SIZE", "500"))    # page_size untuk fetch task
+BATCH_SIZE         = int(os.getenv("BATCH_SIZE", "500"))
 
 PROGRESS_FILE = os.getenv("PROGRESS_FILE", "progress_v9.json")
 LOG_FILE      = os.getenv("LOG_FILE", "autolabel_v9.log")
-# ══════════════════════════════════════════════════════════════
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,9 +63,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ══════════════════════════════════════════════════════════════
-# PRE-FILTER — skip heading/teks kosong sebelum hit API
-# ══════════════════════════════════════════════════════════════
 _HEADING_PATTERNS = [
     re.compile(r"^\s*(?:BAB\s+[IVXLCDM\d]+|[\d]+(?:\.[\d]+)*\.?\s*[A-Z\s]{3,})\s*$", re.I),
     re.compile(r"^\s*[a-z]\.\s*$"),
@@ -138,9 +83,6 @@ def is_heading_or_empty(text: str) -> bool:
             return True
     return False
 
-# ══════════════════════════════════════════════════════════════
-# SYSTEM PROMPT — dioptimalkan untuk scout-17b, domain DKI
-# ══════════════════════════════════════════════════════════════
 SYSTEM_PROMPT = """\
 Kamu adalah sistem Named Entity Recognition (NER) untuk dokumen pemerintah \
 Provinsi DKI Jakarta — laporan tahunan, rencana aksi, peraturan daerah, surat \
@@ -283,9 +225,6 @@ VALID_LABELS = {
     "DAT","TIM","PRC","MON","QTY","ORD","CRD","REG"
 }
 
-# ══════════════════════════════════════════════════════════════
-# PROGRESS
-# ══════════════════════════════════════════════════════════════
 def load_progress() -> set:
     if Path(PROGRESS_FILE).exists():
         with open(PROGRESS_FILE, "r") as f:
@@ -296,9 +235,6 @@ def save_progress(done: set):
     with open(PROGRESS_FILE, "w") as f:
         json.dump({"done": sorted(done)}, f)
 
-# ══════════════════════════════════════════════════════════════
-# LABEL STUDIO CLIENT
-# ══════════════════════════════════════════════════════════════
 class LabelStudioClient:
     def __init__(self, base_url: str, refresh_token: str):
         self.base_url      = base_url.rstrip("/")
@@ -322,7 +258,6 @@ class LabelStudioClient:
             log.info("Token mendekati expire, refresh...")
             self._do_auth()
 
-    # ── NORMAL MODE: via view (hanya unlabeled) ──
     def get_tasks_via_view(self, view_id: int, id_start: int, id_end: int):
         """Fetch unlabeled tasks via view=25. Stop saat min ID halaman > ID_END."""
         page = 1
@@ -345,13 +280,13 @@ class LabelStudioClient:
             page += 1
             time.sleep(0.05)
 
-    # ── RELABEL MODE: langsung ke /api/projects/PROJECT_ID/tasks ──
     def get_all_tasks_in_range(self, project_id: int, id_start: int, id_end: int):
         """
         Fetch SEMUA task (labeled + unlabeled) menggunakan endpoint project.
         Filter range ID dilakukan di Python karena API tidak support filter id__gte
         secara konsisten di semua versi Label Studio.
         """
+
         page = 1
         found_any_in_range = False
 
@@ -372,20 +307,16 @@ class LabelStudioClient:
             if page % 5 == 0 or page == 1:
                 log.info(f"Fetch page {page} | ID range halaman: {min_id_page} – {max_id_page}")
 
-            # Yield task yang masuk range
             for task in tasks:
                 tid = task.get("id", 0)
                 if id_start <= tid <= id_end:
                     found_any_in_range = True
                     yield task
 
-            # Stop kondisi: halaman sudah melewati ID_END
             if min_id_page > id_end:
                 log.info(f"Page {page}: min ID {min_id_page} > ID_END {id_end}. Selesai.")
                 break
 
-            # Stop kondisi: task di bawah ID_START semua (belum sampai range, tapi halaman berikut mungkin ada)
-            # Lanjut saja, jangan stop prematur
             page += 1
             time.sleep(0.05)
 
@@ -469,9 +400,6 @@ class LabelStudioClient:
         log.error(f"Gagal POST annotation task {task_id}.")
         return False
 
-# ══════════════════════════════════════════════════════════════
-# NER MODEL — scout-17b + round-robin key rotation
-# ══════════════════════════════════════════════════════════════
 class NERModel:
     """
     Round-robin key rotation: setiap request pakai key berikutnya secara bergilir.
@@ -479,6 +407,7 @@ class NERModel:
     5 key × 30 RPM = 150 RPM efektif (dibatasi TPM → ~14 req/mnt/key aman).
     Saat 429: tandai key sebagai cooldown, skip ke key berikutnya.
     """
+
     def __init__(self, api_keys: list):
         if not api_keys:
             raise ValueError("Minimal 1 API key harus diisi.")
@@ -486,10 +415,9 @@ class NERModel:
         self.n_keys         = len(api_keys)
         self.clients        = [Groq(api_key=k) for k in api_keys]
         self.model          = "meta-llama/llama-4-scout-17b-16e-instruct"
-        self.rr_index       = 0   # round-robin index
-        # Per-key timing untuk rate limiting
+        self.rr_index       = 0
         self.key_last_req   = [0.0] * self.n_keys
-        self.key_cooldown   = [0.0] * self.n_keys   # epoch time sampai cooldown selesai
+        self.key_cooldown   = [0.0] * self.n_keys
         self.min_interval   = 60.0 / MAX_RPM_PER_KEY
 
         log.info(f"Model: {self.model}")
@@ -504,7 +432,6 @@ class NERModel:
             self.rr_index += 1
             if now >= self.key_cooldown[idx]:
                 return idx
-        # Semua key dalam cooldown → tunggu yang paling cepat selesai
         min_wait_idx = min(range(self.n_keys), key=lambda i: self.key_cooldown[i])
         wait_sec     = self.key_cooldown[min_wait_idx] - now
         if wait_sec > 0:
@@ -520,7 +447,6 @@ class NERModel:
         for attempt in range(MAX_RETRIES * self.n_keys):
             key_idx = self._next_available_key()
 
-            # Rate limit per key
             elapsed = time.time() - self.key_last_req[key_idx]
             if elapsed < self.min_interval:
                 time.sleep(self.min_interval - elapsed)
@@ -543,14 +469,12 @@ class NERModel:
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str:
-                    # Key kena rate limit → cooldown 60 detik
                     cooldown_until = time.time() + 62
                     self.key_cooldown[key_idx] = cooldown_until
                     log.warning(
                         f"Key [{key_idx+1}/{self.n_keys}] kena 429 → "
                         f"cooldown 60s. Rotate ke key berikutnya."
                     )
-                    # Jika ada key lain, langsung retry tanpa delay extra
                     if self.n_keys > 1:
                         continue
                     else:
@@ -596,7 +520,6 @@ class NERModel:
             log.warning(f"JSON parse gagal. Raw: {raw[:200]}")
             return []
 
-
 def _remove_subsumed_spans(entities: list, text: str) -> list:
     """Hapus entitas yang span-nya fully contained dalam entitas yang lebih panjang."""
     if not entities:
@@ -616,7 +539,6 @@ def _remove_subsumed_spans(entities: list, text: str) -> list:
     order = {e["text"]: i for i, e in enumerate(entities)}
     resolved.sort(key=lambda e: order.get(e["text"], 999))
     return resolved
-
 
 def entities_to_label_studio_result(text: str, entities: list) -> list:
     result      = []
@@ -647,9 +569,6 @@ def entities_to_label_studio_result(text: str, entities: list) -> list:
         })
     return result
 
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
 def main():
     log.info("=" * 60)
     log.info("NER Auto-Labeling Script v9")
@@ -678,7 +597,6 @@ def main():
         "prefiltered": 0,
     }
 
-    # Pilih iterator sesuai mode
     if MODE == "relabel":
         task_iter = ls_client.get_all_tasks_in_range(PROJECT_ID, ID_START, ID_END)
     else:
@@ -693,7 +611,6 @@ def main():
                 or task.get("total_annotations", 0) > 0
             )
 
-            # Skip kalau sudah selesai di run ini
             if task_id in done:
                 stats["skipped"] += 1
                 continue
@@ -704,7 +621,6 @@ def main():
                 stats["skipped"] += 1
                 continue
 
-            # ── RELABEL: hapus annotation lama ──
             if MODE == "relabel" and already_labeled:
                 ann_ids = ls_client.get_annotation_ids(task_id)
                 if ann_ids:
@@ -720,7 +636,6 @@ def main():
                     )
                     time.sleep(0.1)
 
-            # ── PREDICT ──
             pre_filter_hit = is_heading_or_empty(text)
             entities       = ner_model.predict(text)
 
@@ -729,7 +644,6 @@ def main():
             elif GROQ_DELAY_SEC > 0:
                 time.sleep(GROQ_DELAY_SEC)
 
-            # ── POST ANNOTATION ──
             ls_result = entities_to_label_studio_result(text, entities)
 
             if not ls_result:
@@ -780,7 +694,6 @@ def main():
             f"  Gagal           : {stats['failed']}"
         )
         log.info("=" * 60)
-
 
 if __name__ == "__main__":
     main()
