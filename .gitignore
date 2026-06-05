@@ -1,0 +1,40 @@
+# --- Python Cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Environment & Secrets ---
+# Kredensial dan API keys jangan pernah dicommit ke git
+.env
+.env.*
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Project Specific Logs & Progress ---
+# Log file hasil auto-labeling
+*.log
+autolabel_v9.log
+
+# Checkpoint/progress JSON local
+progress_v9.json
+*.json
+
+# --- IDEs / Editors ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db

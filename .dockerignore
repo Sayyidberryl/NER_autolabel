@@ -1,0 +1,33 @@
+# Mengabaikan file sensitif yang berisi kredensial dan API keys (WAJIB diabaikan agar tidak bocor ke dalam image)
+.env
+
+# Mengabaikan file log yang dihasilkan selama eksekusi script secara lokal
+*.log
+autolabel_v9.log
+
+# Mengabaikan file checkpoint/progress JSON lokal agar tidak mengganggu progress di server/Railway
+*.json
+progress_v9.json
+
+# Mengabaikan file python bytecode dan cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Mengabaikan folder kontrol versi Git
+.git
+.gitignore
+
+# Mengabaikan konfigurasi editor/IDE lokal
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Mengabaikan file konfigurasi Docker itu sendiri
+Dockerfile
+.dockerignore
