@@ -245,13 +245,31 @@ class LabelStudioClient:
         self._do_auth()
 
     def _do_auth(self):
-        url  = f"{self.base_url}/api/token/refresh"
-        resp = self.session.post(url, json={"refresh": self.refresh_token}, timeout=15)
-        resp.raise_for_status()
-        access_token = resp.json()["access"]
-        self.session.headers.update({"Authorization": f"Bearer {access_token}"})
-        self.last_refresh = time.time()
-        log.info("JWT Access Token berhasil didapat.")
+        url = f"{self.base_url}/api/token/refresh"
+        for attempt in range(3):
+            try:
+                log.info(f"Mencoba jabat tangan dengan Label Studio (Attempt {attempt+1}/3)...")
+                resp = self.session.post(url, json={"refresh": self.refresh_token}, timeout=60)
+                resp.raise_for_status()
+                access_token = resp.json()["access"]
+                self.session.headers.update({"Authorization": f"Bearer {access_token}"})
+                self.last_refresh = time.time()
+                log.info("JWT Access Token berhasil didapat. Koneksi aman!")
+                return
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.Timeout):
+                log.warning(f"Koneksi timeout pada attempt {attempt+1}. Server tujuan terlalu lama merespon.")
+                if attempt < 2:
+                    log.info("Menunggu 5 detik sebelum mencoba kembali...")
+                    time.sleep(5)
+            except Exception as e:
+                log.error(f"Gagal autentikasi karena kendala lain: {e}")
+                raise e
+        
+        # Jika semua kesempatan habis, buat script sengaja sleep lama agar Railway tidak loop restart terus
+        log.error("CRITICAL: Server Label Studio memblokir rute koneksi dari Railway (Firewall/Timeout).")
+        log.info("Script akan ditahan selama 10 menit untuk mencegah penumpukan log crash di Railway...")
+        time.sleep(600)
+        raise Exception("Gapar terhubung ke Label Studio karena selalu Timeout.")
 
     def _ensure_auth(self):
         if time.time() - self.last_refresh >= TOKEN_REFRESH_SECS:
